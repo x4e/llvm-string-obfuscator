@@ -1,3 +1,7 @@
+#include "llvm/Pass.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
+
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -28,7 +32,7 @@ class GlobalString {
 Function *createDecodeStubFunc(Module &M, vector<GlobalString*> &GlobalStrings, Function *DecodeFunc){
 	auto &Ctx = M.getContext();
 	// Add DecodeStub function
-	FunctionCallee DecodeStubCallee = M.getOrInsertFunction("decode_stub",
+	FunctionCallee DecodeStubCallee = M.getOrInsertFunction(".plbv",
 /*ret*/		Type::getVoidTy(Ctx));
 	Function *DecodeStubFunc = cast<Function>(DecodeStubCallee.getCallee());
 	DecodeStubFunc->setCallingConv(CallingConv::C);
@@ -89,7 +93,7 @@ Function *createDecodeStubFunc(Module &M, vector<GlobalString*> &GlobalStrings, 
 // }
 Function *createDecodeFunc(Module &M){
 	auto &Ctx = M.getContext();
-	FunctionCallee DecodeFuncCallee = M.getOrInsertFunction("decode", 
+	FunctionCallee DecodeFuncCallee = M.getOrInsertFunction(".plb", 
 	/*ret*/			Type::getVoidTy(Ctx),
  /*args*/		Type::getInt8PtrTy(Ctx, 8),
  				Type::getInt32Ty(Ctx));
@@ -119,13 +123,16 @@ Function *createDecodeFunc(Module &M){
 	auto *var10 = Builder6->CreateGEP(phi_var7, ConstantInt::get(IntegerType::get(Ctx, 64), 1), "var10");
 
 	auto *var11 = Builder6->CreateLoad(phi_var7, "var2");
-		
-	auto *var12 = Builder6->CreateAdd(var11, ConstantInt::getSigned(IntegerType::get(Ctx, 8), -1), "var12");
-		
-	Builder6->CreateStore(var12, phi_var7);
-	auto *var13 = Builder6->CreateICmpSGT(phi_var8, ConstantInt::get(IntegerType::get(Ctx, 32), 1), "var13");
+	
+	//auto *var12 = Builder6->CreateIntCast(var9, Type::getInt8Ty(Ctx), true, "var12");
+	//auto *var13 = Builder6->CreateXor(var11, var12, "var13");
+	auto *var14 = Builder6->CreateXor(var11, ConstantInt::getSigned(IntegerType::get(Ctx, 8), 0xE2), "var14");
+	auto *var15 = Builder6->CreateAdd(var14, ConstantInt::getSigned(IntegerType::get(Ctx, 8), 23), "var15");
+	
+	Builder6->CreateStore(var15, phi_var7);
+	auto *var16 = Builder6->CreateICmpSGT(phi_var8, ConstantInt::get(IntegerType::get(Ctx, 32), 1), "var16");
 
-	Builder6->CreateCondBr(var13, bb6, bb14);
+	Builder6->CreateCondBr(var16, bb6, bb14);
 	
 	IRBuilder<> *Builder14 = new IRBuilder<>(bb14);
 	Builder14->CreateRetVoid();
@@ -155,10 +162,11 @@ void createDecodeStubBlock(Function *F, Function *DecodeStubFunc){
 }
 
 char *EncodeString(const char* Data, unsigned int Length) {
+	printf("Encoding %s\n", Data);
 	// Encode string
 	char *NewData = (char*)malloc(Length);
 	for(unsigned int i = 0; i < Length; i++){
-		NewData[i] = Data[i] + 1;
+		NewData[i] = (Data[i] - 23) ^ 0xE2;
 	}
 
 	return NewData;
@@ -229,37 +237,40 @@ vector<GlobalString*> encodeGlobalStrings(Module& M){
 	return GlobalStrings;
 }
 
-struct StringObfuscatorModPass : public PassInfoMixin<StringObfuscatorModPass> {
-	PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
-	// Transform the strings
-	auto GlobalStrings = encodeGlobalStrings(M);
-
-	// Inject functions
-	Function *DecodeFunc = createDecodeFunc(M);
-	Function *DecodeStub = createDecodeStubFunc(M, GlobalStrings, DecodeFunc);
-
-	// Inject a call to DecodeStub from main
-	Function *MainFunc = M.getFunction("main");
-	createDecodeStubBlock(MainFunc, DecodeStub);
-
-	return PreservedAnalyses::all();
-	};
+struct StringObfuscatorModPass : public ModulePass {
+	static char ID;
+	StringObfuscatorModPass() : ModulePass(ID) {}
+	
+	bool runOnModule(Module &M) override {
+		// Transform the strings
+		auto GlobalStrings = encodeGlobalStrings(M);
+		
+		// Inject functions
+		Function *DecodeFunc = createDecodeFunc(M);
+		Function *DecodeStub = createDecodeStubFunc(M, GlobalStrings, DecodeFunc);
+		
+		// Inject a call to DecodeStub from main
+		Function *MainFunc = M.getFunction("JNI_OnLoad");
+		createDecodeStubBlock(MainFunc, DecodeStub);
+		
+		return true;
+	}
 };
 } // end anonymous namespace
 
-extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
-llvmGetPassPluginInfo() {
-	return {
-		LLVM_PLUGIN_API_VERSION, "StringObfuscatorPass", "v0.1", [](PassBuilder &PB) {
-			PB.registerPipelineParsingCallback([](StringRef Name, ModulePassManager &MPM,
-					 ArrayRef<PassBuilder::PipelineElement>) {
-					if(Name == "string-obfuscator-pass"){
-						MPM.addPass(StringObfuscatorModPass());
-						return true;
-					}
-					return false;
-				}
-			);
-		}
-	};
+// Pass info
+char StringObfuscatorModPass::ID = 0; // LLVM ignores the actual value
+static RegisterPass<StringObfuscatorModPass> X("clangtool", "Example pass", false, false);
+
+// Pass loading stuff
+// To use, run: clang -Xclang -load -Xclang <your-pass>.so <other-args> ...
+
+// This function is of type PassManagerBuilder::ExtensionFn
+static void loadPass(const PassManagerBuilder &Builder, legacy::PassManagerBase &PM) {
+	printf("Hello from obfuscator\n");
+	PM.add(new StringObfuscatorModPass());
+  //PM.add(new ClangTool());
 }
+// These constructors add our pass to a list of global extensions.
+static RegisterStandardPasses clangtoolLoader_Ox(PassManagerBuilder::EP_OptimizerLast, loadPass);
+static RegisterStandardPasses clangtoolLoader_O0(PassManagerBuilder::EP_EnabledOnOptLevel0, loadPass);
